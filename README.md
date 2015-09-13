@@ -4,6 +4,18 @@ openssh-keychain
 OpenSSH mod to store passwords in OS X keychain. It's a patch to various versions of openssh, adding a hook to the code to store and retrieve passwords to/from OS X keychain.
 This guide describes the steps to install this patch on the openssh package distributed by MacPorts, but patch should work with other (source) distributions.
 
+Installation (brew)
+=======================
+
+Just run 'brew edit homebrew/dupes/openssh' and the following to the config, at 36th line:
+
+    #
+    # keychain patch
+    patch do
+      url "https://raw.githubusercontent.com/zoltansx/openssh-keychain/master/openssh-7.1p1.patch"
+      sha256 "32e5dec507e80005a8a7a25d50a3eb3349440873c44597c0e43bc34cf18212f1"
+    end
+
 Installation (MacPorts)
 =======================
 
