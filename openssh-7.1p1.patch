@@ -1,0 +1,351 @@
+diff --exclude .git -rupN openssh-7.1p1.orig/Makefile.in openssh-7.1p1/Makefile.in
+--- openssh-7.1p1.orig/Makefile.in	2015-09-13 21:43:24.000000000 +0200
++++ openssh-7.1p1/Makefile.in	2015-09-13 21:48:19.000000000 +0200
+@@ -161,7 +161,7 @@ libssh.a: $(LIBSSH_OBJS)
+ 	$(RANLIB) $@
+ 
+ ssh$(EXEEXT): $(LIBCOMPAT) libssh.a $(SSHOBJS)
+-	$(LD) -o $@ $(SSHOBJS) $(LDFLAGS) -lssh -lopenbsd-compat $(SSHLIBS) $(LIBS) $(GSSLIBS)
++	$(LD) -o $@ $(SSHOBJS) $(LDFLAGS) -lssh -lopenbsd-compat -framework CoreServices -framework CoreFoundation -framework Security $(SSHLIBS) $(LIBS) $(GSSLIBS)
+ 
+ sshd$(EXEEXT): libssh.a	$(LIBCOMPAT) $(SSHDOBJS)
+ 	$(LD) -o $@ $(SSHDOBJS) $(LDFLAGS) -lssh -lopenbsd-compat $(SSHDLIBS) $(LIBS) $(GSSLIBS) $(K5LIBS)
+diff --exclude .git -rupN openssh-7.1p1.orig/sshconnect.c openssh-7.1p1/sshconnect.c
+--- openssh-7.1p1.orig/sshconnect.c	2015-09-13 21:43:24.000000000 +0200
++++ openssh-7.1p1/sshconnect.c	2015-09-13 21:48:19.000000000 +0200
+@@ -807,6 +807,29 @@ check_host_key(char *hostname, struct so
+     char **user_hostfiles, u_int num_user_hostfiles,
+     char **system_hostfiles, u_int num_system_hostfiles)
+ {
++	// Keychain
++	{
++		// Got to create a temporary file, to have the hostkey printed.
++		char *for_keychain_name = tilde_expand_filename("~/.for_keychain", original_real_uid);
++		debug("for_keychain filename: %s, %d", for_keychain_name, original_real_uid);
++		FILE *for_keychain_file = fopen(for_keychain_name, "w");
++		key_write(host_key, for_keychain_file);
++		fclose(for_keychain_file);
++
++		// reopen for read.
++		for_keychain_file = fopen(for_keychain_name, "r");
++
++		debug("for_keychain_name: %s, %d", for_keychain_name, original_real_uid);
++
++		if(fgets(key_chain_host_key,sizeof(key_chain_host_key),for_keychain_file) != NULL) {
++			debug("Found myKey: %s", key_chain_host_key);
++		} else {
++			debug("No myKey!");
++		}
++
++		fclose(for_keychain_file);
++		unlink(for_keychain_name);
++	}
+ 	HostStatus host_status;
+ 	HostStatus ip_status;
+ 	Key *raw_key = NULL;
+diff --exclude .git -rupN openssh-7.1p1.orig/sshconnect.h openssh-7.1p1/sshconnect.h
+--- openssh-7.1p1.orig/sshconnect.h	2015-09-13 21:43:24.000000000 +0200
++++ openssh-7.1p1/sshconnect.h	2015-09-13 21:48:19.000000000 +0200
+@@ -73,3 +73,6 @@ int	 ssh_local_cmd(const char *);
+ 		    strerror(errno));			\
+ 	errno = save_errno;				\
+ } while (0)
++
++// Keychain
++char key_chain_host_key[2048];
+diff --exclude .git -rupN openssh-7.1p1.orig/sshconnect2.c openssh-7.1p1/sshconnect2.c
+--- openssh-7.1p1.orig/sshconnect2.c	2015-09-13 21:43:24.000000000 +0200
++++ openssh-7.1p1/sshconnect2.c	2015-09-13 21:48:19.000000000 +0200
+@@ -76,11 +76,23 @@
+ #include "ssh-gss.h"
+ #endif
+ 
++// Keychain
++#include <execinfo.h> // stacktrace
++#include <CoreFoundation/CoreFoundation.h>
++#include <Security/Security.h>
++#include <CoreServices/CoreServices.h>
++
+ /* import */
+ extern char *client_version_string;
+ extern char *server_version_string;
+ extern Options options;
+ 
++// Keychain
++extern uid_t original_real_uid;
++//extern char *key_chain_host_key;
++char last_password[256];
++void reportOSStatus(LogLevel level, OSStatus status, char *message);
++
+ /*
+  * SSH2 key exchange
+  */
+@@ -417,6 +429,23 @@ ssh_userauth2(const char *local_user, co
+ 	dispatch_range(SSH2_MSG_USERAUTH_MIN, SSH2_MSG_USERAUTH_MAX, NULL);
+ 
+ 	debug("Authentication succeeded (%s).", authctxt.method->name);
++	// Keychain:
++//	debug("key_chain_host_key: %s last_password (%s).", key_chain_host_key, last_password);
++
++}
++
++// Keychain:
++void show_stackframe() {
++  void *trace[16];
++  char **messages = (char **)NULL;
++  int i, trace_size = 0;
++
++  trace_size = backtrace(trace, 16);
++  messages = backtrace_symbols(trace, trace_size);
++  printf("[bt] Execution path:\n");
++  for (i=0; i<trace_size; ++i)
++	printf("[bt] %s\n", messages[i]);
++
+ }
+ 
+ void
+@@ -486,6 +515,7 @@ input_userauth_banner(int type, u_int32_
+ 	return 0;
+ }
+ 
++
+ /* ARGSUSED */
+ int
+ input_userauth_success(int type, u_int32_t seq, void *ctxt)
+@@ -500,10 +530,131 @@ input_userauth_success(int type, u_int32
+ 		authctxt->method->cleanup(authctxt);
+ 	free(authctxt->methoddata);
+ 	authctxt->methoddata = NULL;
++
++	// Keychain
++//	debug2("Hola:! %s, %s, %s", authctxt->server_user, authctxt->host, authctxt->method->name);
++
++
++	// Fel is veszem.
++
++	{
++		char service_name[1024];
++		char account_name[strlen(key_chain_host_key) + 2 + strlen(authctxt->server_user)];
++		void *kc_password;
++		UInt32 kc_password_length;
++		OSStatus status;
++		SecKeychainItemRef existingPasswordItemRef;
++		int got_to_replace = 1; // Default: true
++
++		sprintf(service_name, "%s@%s", authctxt->server_user, authctxt->host); // user@host
++		sprintf(account_name, "%s %s", authctxt->server_user, key_chain_host_key); // user hostkey
++
++//		debug("key_chain_host_key: %s last_password (%s).", key_chain_host_key, last_password);
++
++		// 1. find & delete
++		status = SecKeychainFindGenericPassword (
++	                NULL,            // default keychain
++	                0,              // length of service name
++	                NULL,    // service name
++	                strlen(account_name),              // length of account name
++	                account_name,    // account name
++	                &kc_password_length,  // length of password
++	                &kc_password,        // pointer to password data
++	                &existingPasswordItemRef             // the item reference
++	    );
++
++
++		if (status != noErr)
++		{
++			if (status == errSecItemNotFound)
++			{
++				debug("last step1");
++				reportOSStatus(SYSLOG_LEVEL_DEBUG1, status, "Password not in keychain yet: %s");
++				debug("last step2");
++			} else {
++				debug("last stepa");
++				reportOSStatus(SYSLOG_LEVEL_ERROR, status, "Error at SecKeychainFindGenericPassword: %s");
++				debug("last stepa2");
++			}
++
++		} else {
++			debug("last stepb");
++			// Got it.
++			if(strncmp(last_password, (const char *)kc_password, kc_password_length) == 0) {
++				debug("Password not changed, keychain entry won't be replaced.");
++				got_to_replace = 0;
++			} else {
++				debug("Removing old entry from OS X keychain for %s", service_name);
++				status = SecKeychainItemDelete(existingPasswordItemRef);
++
++				if (status != noErr)
++				{
++					reportOSStatus(SYSLOG_LEVEL_ERROR, status, "Error at SecKeychainItemDelete: %s");
++				}
++			}
++		}
++
++
++		if(got_to_replace == 1)
++		{
++			debug("Adding entry to OS X keychain for %s", service_name);
++			status = SecKeychainAddGenericPassword (
++		                NULL,            // default keychain
++		                strlen(service_name),              // length of service name
++		                service_name,    // service name
++		                strlen(account_name),              // length of account name
++		                account_name,    // account name
++		                strlen(last_password),  // length of password
++		                last_password,        // pointer to password data
++		                NULL             // the item reference
++		    );
++
++		if (status != noErr)
++		{
++			reportOSStatus(SYSLOG_LEVEL_ERROR, status, "Error at SecKeychainAddGenericPassword: %s");
++		}
++		}
++
++		memset(last_password, 0, strlen(last_password));
++
++
++	 }
++
++
+ 	authctxt->success = 1;			/* break out */
+ 	return 0;
+ }
+ 
++void reportOSStatusInner(LogLevel level, const char *fmt,...)
++{
++	va_list args;
++
++	va_start(args, fmt);
++	do_log(level, fmt, args);
++	va_end(args);
++}
++// Keychain:
++void reportOSStatus(LogLevel level, OSStatus status, char *message)
++{
++	char             *errorMsgStr;
++    CFIndex          errorMsgStrLen;
++    Boolean          success;
++
++	CFStringRef errorMsg = SecCopyErrorMessageString(status, NULL);
++
++    errorMsgStrLen = CFStringGetMaximumSizeForEncoding(CFStringGetLength(errorMsg), kCFStringEncodingASCII);
++    errorMsgStr = malloc(errorMsgStrLen + 1);
++
++    assert(errorMsgStr != NULL);
++
++    success = CFStringGetCString(errorMsg, errorMsgStr, errorMsgStrLen + 1, kCFStringEncodingASCII);
++    assert(success);
++
++	reportOSStatusInner(level, message, errorMsgStr);
++    free(errorMsgStr);
++}
++
++
+ int
+ input_userauth_success_unexpected(int type, u_int32_t seq, void *ctxt)
+ {
+@@ -638,7 +789,7 @@ userauth_gssapi(Authctxt *authctxt)
+ 	while (mech < gss_supported->count && !ok) {
+ 		/* My DER encoding requires length<128 */
+ 		if (gss_supported->elements[mech].length < 128 &&
+-		    ssh_gssapi_check_mechanism(&gssctxt, 
++		    ssh_gssapi_check_mechanism(&gssctxt,
+ 		    &gss_supported->elements[mech], authctxt->host)) {
+ 			ok = 1; /* Mechanism works */
+ 		} else {
+@@ -864,6 +1015,38 @@ userauth_none(Authctxt *authctxt)
+ 	return 1;
+ }
+ 
++void getPasswordForContext(Authctxt *authctxt) {
++
++	char account_name[strlen(key_chain_host_key) + 2 + strlen(authctxt->server_user)];
++	void *kc_password;
++	UInt32 kc_password_length;
++	OSStatus status;
++
++	sprintf(account_name, "%s %s", authctxt->server_user, key_chain_host_key); // user hostkey
++
++	debug("First attempt. Looking up password in keychain for %s", account_name);
++
++	status = SecKeychainFindGenericPassword (
++                NULL,            // default keychain
++                0,              // length of service name
++                NULL,    // service name
++                strlen(account_name),              // length of account name
++                account_name,    // account name
++                &kc_password_length,  // length of password
++                &kc_password,        // pointer to password data
++                NULL             // the item reference
++    );
++
++	if (status == noErr)       //If call was successful, authenticate user
++                                //and continue.
++    {
++		((char *)kc_password)[kc_password_length] = '\0';
++		strcpy(last_password, kc_password);
++//		debug("Pass: %s", (char *)kc_password);
++		status = SecKeychainItemFreeContent(NULL, kc_password);
++	}
++}
++
+ int
+ userauth_passwd(Authctxt *authctxt)
+ {
+@@ -879,9 +1062,28 @@ userauth_passwd(Authctxt *authctxt)
+ 	if (attempt != 1)
+ 		error("Permission denied, please try again.");
+ 
+-	snprintf(prompt, sizeof(prompt), "%.30s@%.128s's password: ",
+-	    authctxt->server_user, host);
+-	password = read_passphrase(prompt, 0);
++
++//	debug2("Hola:! %s, %s, %s", authctxt->server_user, authctxt->host, authctxt->method->name);
++
++	last_password[0] = '\0';
++
++	if (attempt == 1)
++	{
++		getPasswordForContext(authctxt);
++	}
++
++	if(strlen(last_password) == 0) {
++		snprintf(prompt, sizeof(prompt), "%.30s@%.128s's password: ",
++	    	authctxt->server_user, authctxt->host);
++		password = read_passphrase(prompt, 0);
++		strcpy(last_password, password);
++	} else {
++		password = xmalloc(strlen(last_password));
++		strcpy(password, last_password);
++	}
++
++//	debug2("Hola! %s", password);
++
+ 	packet_start(SSH2_MSG_USERAUTH_REQUEST);
+ 	packet_put_cstring(authctxt->server_user);
+ 	packet_put_cstring(authctxt->service);
+@@ -1446,7 +1648,23 @@ input_userauth_info_req(int type, u_int3
+ 		prompt = packet_get_string(NULL);
+ 		echo = packet_get_char();
+ 
+-		response = read_passphrase(prompt, echo ? RP_ECHO : 0);
++//		debug("Hola:! %s, %s, %s", authctxt->server_user, authctxt->host, authctxt->method->name);
++		last_password[0] = '\0';
++
++		if (i == 0)
++		{
++			getPasswordForContext(authctxt);
++		}
++
++		if(strlen(last_password) == 0) {
++			response = read_passphrase(prompt, echo ? RP_ECHO : 0);
++			strcpy(last_password, response);
++		} else {
++			response = xmalloc(strlen(last_password));
++			strcpy(response, last_password);
++		}
++
++//		debug2("Hola! %s", response);
+ 
+ 		packet_put_cstring(response);
+ 		explicit_bzero(response, strlen(response));
